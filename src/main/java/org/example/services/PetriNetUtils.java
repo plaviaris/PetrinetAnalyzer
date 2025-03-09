@@ -17,38 +17,6 @@ public class PetriNetUtils {
         return XMLParser.loadPetriNet(file);
     }
 
-    // Generates the coverability graph for the given PetriNet
-    public static Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> generateCoverabilityGraph(PetriNet petriNet) {
-        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> coverabilityGraph = new HashMap<>();
-        Set<Map<String, Integer>> visitedMarkings = new HashSet<>();
-        Queue<Map<String, Integer>> workQueue = new LinkedList<>();
-
-        Map<String, Integer> initialMarking = getInitialMarking(petriNet);
-        workQueue.add(initialMarking);
-        coverabilityGraph.put(initialMarking, new HashMap<>());
-
-        while (!workQueue.isEmpty()) {
-            Map<String, Integer> currentMarking = workQueue.poll();
-
-            for (Transition transition : petriNet.getTransitions()) {
-                if (canFire(currentMarking, transition, petriNet)) {
-                    Map<String, Integer> newMarking = fireTransition(currentMarking, transition, petriNet);
-                    newMarking = addOmegas(currentMarking, newMarking, visitedMarkings);
-
-                    if (!visitedMarkings.contains(newMarking)) {
-                        visitedMarkings.add(newMarking);
-                        workQueue.add(newMarking);
-                        coverabilityGraph.putIfAbsent(newMarking, new HashMap<>());
-                    }
-
-                    coverabilityGraph.get(currentMarking).put(transition, newMarking);
-                }
-            }
-        }
-
-        return coverabilityGraph;
-    }
-
     // Generates the reachability graph for the given PetriNet
     public static Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> generateReachabilityGraph(PetriNet petriNet) {
         Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> reachabilityGraph = new HashMap<>();
@@ -76,8 +44,10 @@ public class PetriNetUtils {
                 }
             }
         }
+
         return reachabilityGraph;
     }
+
 
     // Determines the inheritance type between the parent and child PetriNet
     public static String determineInheritanceType(PetriNet parentNet, PetriNet childNet) {
@@ -92,7 +62,7 @@ public class PetriNetUtils {
         Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> protocolChildGraph = filterGraph(childGraph, parentTransitions);
 
         boolean isProtocolInheritance = compareReachabilityGraphs(parentGraph, protocolChildGraph);
-        boolean isProjectionInheritance = projectionInheritanceChecker.checkProjectionInheritance(parentNet, childNet, true);
+        boolean isProjectionInheritance = projectionInheritanceChecker.checkProjectionInheritanceUsingReachabilityGraph(parentGraph, childGraph, parentTransitions);
 
 
         if (isProtocolInheritance) {
@@ -195,27 +165,6 @@ public class PetriNetUtils {
         return newMarking;
     }
 
-    // Adds "omega" markings to handle infinite firing situations
-    private static Map<String, Integer> addOmegas(Map<String, Integer> currentMarking, Map<String, Integer> newMarking, Set<Map<String, Integer>> visitedMarkings) {
-        Map<String, Integer> savedMarking = new HashMap<>(newMarking);
-        boolean updated;
-
-        do {
-            updated = false;
-            for (Map<String, Integer> previousMarking : visitedMarkings) {
-                if (isCovered(previousMarking, newMarking)) {
-                    for (String place : newMarking.keySet()) {
-                        if (newMarking.get(place) > previousMarking.getOrDefault(place, 0)) {
-                            newMarking.put(place, Integer.MAX_VALUE);
-                            updated = true;
-                        }
-                    }
-                }
-            }
-        } while (!savedMarking.equals(newMarking));
-
-        return newMarking;
-    }
 
     // Checks if the new marking is covered by the previous marking
     private static boolean isCovered(Map<String, Integer> previousMarking, Map<String, Integer> newMarking) {
