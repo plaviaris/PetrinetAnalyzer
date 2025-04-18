@@ -8,6 +8,7 @@ import org.example.objects.Transition;
 import javax.xml.bind.JAXBException;
 import java.io.File;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class PetriNetUtils {
 
@@ -17,25 +18,30 @@ public class PetriNetUtils {
         return XMLParser.loadPetriNet(file);
     }
 
-    // Generates the reachability graph for the given PetriNet
     public static Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> generateReachabilityGraph(PetriNet petriNet) {
         Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> reachabilityGraph = new HashMap<>();
         Set<Map<String, Integer>> visitedMarkings = new HashSet<>();
         Queue<Map<String, Integer>> workQueue = new LinkedList<>();
 
         Map<String, Integer> initialMarking = getInitialMarking(petriNet);
+        visitedMarkings.add(initialMarking);
         workQueue.add(initialMarking);
         reachabilityGraph.put(initialMarking, new HashMap<>());
 
-        while (!workQueue.isEmpty()) {
-            Map<String, Integer> currentMarking = workQueue.poll();
+        int stepCount = 0;
+        final int MAX_STEPS = 10_000;
 
+        while (!workQueue.isEmpty()) {
+            if (++stepCount > MAX_STEPS) {
+                throw new IllegalStateException(
+                        "Reachability graph is too large – more than " + MAX_STEPS + " states.");
+            }
+            Map<String, Integer> currentMarking = workQueue.poll();
             for (Transition transition : petriNet.getTransitions()) {
                 if (canFire(currentMarking, transition, petriNet)) {
                     Map<String, Integer> newMarking = fireTransition(currentMarking, transition, petriNet);
 
-                    if (!visitedMarkings.contains(newMarking)) {
-                        visitedMarkings.add(newMarking);
+                    if (visitedMarkings.add(newMarking)) {
                         workQueue.add(newMarking);
                         reachabilityGraph.putIfAbsent(newMarking, new HashMap<>());
                     }
@@ -44,26 +50,30 @@ public class PetriNetUtils {
                 }
             }
         }
-
         return reachabilityGraph;
     }
 
-
-    // Determines the inheritance type between the parent and child PetriNet
     public static String determineInheritanceType(PetriNet parentNet, PetriNet childNet) {
-        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentGraph = generateReachabilityGraph(parentNet);
-        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> childGraph = generateReachabilityGraph(childNet);
+        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentGraph =
+                generateReachabilityGraph(parentNet);
+        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> childGraph =
+                generateReachabilityGraph(childNet);
 
-        Set<String> parentTransitions = new HashSet<>();
-        for (Transition t : parentNet.getTransitions()) {
-            parentTransitions.add(t.getId());
-        }
+        Set<String> parentTransitions = parentNet.getTransitions().stream()
+                .map(Transition::getId).collect(Collectors.toSet());
+        Set<String> parentPlaces = parentNet.getPlaces().stream()
+                .map(Place::getId).collect(Collectors.toSet());
 
-        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> protocolChildGraph = filterGraph(childGraph, parentTransitions);
+        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> protocolChildGraph =
+                filterGraph(childGraph, parentTransitions);
 
-        boolean isProtocolInheritance = compareReachabilityGraphs(parentGraph, protocolChildGraph);
-        boolean isProjectionInheritance = projectionInheritanceChecker.checkProjectionInheritanceUsingReachabilityGraph(parentGraph, childGraph, parentTransitions);
+        boolean isProtocolInheritance =
+                compareReachabilityGraphs(parentGraph, protocolChildGraph, parentPlaces);
 
+        // 4. Projekčné dedenie (použije svoj checker)
+        boolean isProjectionInheritance =
+                projectionInheritanceChecker.checkProjectionInheritanceUsingReachabilityGraph(
+                        parentGraph, childGraph, parentTransitions);
 
         if (isProtocolInheritance) {
             return "Protocol Inheritance";
@@ -74,25 +84,42 @@ public class PetriNetUtils {
         }
     }
 
-    // Compares the reachability graphs of parent and child
-    private static boolean compareReachabilityGraphs(Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentGraph,
-                                                     Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> childGraph) {
-        for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentEntry : parentGraph.entrySet()) {
-            Map<String, Integer> parentMarking = parentEntry.getKey();
+    private static boolean compareReachabilityGraphs(
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> g1,
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> g2,
+            Set<String> placesToCheck) {
 
-            boolean matchingMarking = childGraph.keySet().stream().anyMatch(childMarking -> markingsMatch(parentMarking, childMarking));
-            if (!matchingMarking) {
+        for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> entry1 : g1.entrySet()) {
+            Map<String, Integer> m1 = entry1.getKey();
+
+            // 1) nájdi zodpovedajúce marking v g2 (len na rodičovských miestach)
+            Optional<Map<String, Integer>> optM2 = g2.keySet().stream()
+                    .filter(m2 -> markingsMatchOn(m1, m2, placesToCheck))
+                    .findFirst();
+            if (!optM2.isPresent()) {
+                System.out.println("[PROTOCOL DEBUG] Chýba stav v detskom grafe pre marking rodiča: " + m1);
                 return false;
             }
 
-            Map<String, Integer> matchingChildMarking = childGraph.keySet().stream()
-                    .filter(childMarking -> markingsMatch(parentMarking, childMarking)).findFirst().orElse(null);
-            Map<Transition, Map<String, Integer>> childTransitions = childGraph.get(matchingChildMarking);
-            Map<Transition, Map<String, Integer>> parentTransitions = parentEntry.getValue();
+            Map<String, Integer> m2 = optM2.get();
+            Map<Transition, Map<String, Integer>> trans1 = entry1.getValue();
+            Map<Transition, Map<String, Integer>> trans2 = g2.get(m2);
 
-            for (Transition parentTransition : parentTransitions.keySet()) {
-                if (!childTransitions.containsKey(parentTransition) ||
-                        !childTransitions.get(parentTransition).equals(parentTransitions.get(parentTransition))) {
+            // 2) pre každý rodičovský prechod hľadaj zodpovedajúci v trans2
+            for (Transition t1 : trans1.keySet()) {
+                Transition t2 = trans2.keySet().stream()
+                        .filter(c -> c.getId().equals(t1.getId()))
+                        .findFirst().orElse(null);
+                if (t2 == null) {
+                    System.out.println("[PROTOCOL DEBUG] V detskom grafe chýba prechod '" +
+                            t1.getId() + "' v stave: " + m2);
+                    return false;
+                }
+                // 3) skontroluj ďalšie markingy na rodičovských miestach
+                if (!markingsMatchOn(trans1.get(t1), trans2.get(t2), placesToCheck)) {
+                    System.out.println("[PROTOCOL DEBUG] Nesúlad cieľových markingov pre prechod '"
+                            + t1.getId() + "'. rodič očakáva: " + trans1.get(t1)
+                            + ", dieťa má: " + trans2.get(t2));
                     return false;
                 }
             }
@@ -100,46 +127,55 @@ public class PetriNetUtils {
         return true;
     }
 
-    // Filters the graph to only include transitions in the allowed list
-    private static Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> filterGraph(Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph, Set<String> allowedTransitions) {
-        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> filteredGraph = new HashMap<>();
-        for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> entry : graph.entrySet()) {
-            Map<Transition, Map<String, Integer>> filteredTransitions = new HashMap<>();
-            for (Map.Entry<Transition, Map<String, Integer>> transitionEntry : entry.getValue().entrySet()) {
-                if (allowedTransitions.contains(transitionEntry.getKey().getId())) {
-                    filteredTransitions.put(transitionEntry.getKey(), transitionEntry.getValue());
+    private static Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> filterGraph(
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph,
+            Set<String> allowedTransitions) {
+
+        Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> filtered = new HashMap<>();
+        for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> e : graph.entrySet()) {
+            Map<Transition, Map<String, Integer>> m = new HashMap<>();
+            for (Map.Entry<Transition, Map<String, Integer>> te : e.getValue().entrySet()) {
+                if (allowedTransitions.contains(te.getKey().getId())) {
+                    m.put(te.getKey(), te.getValue());
                 }
             }
-            filteredGraph.put(entry.getKey(), filteredTransitions);
+            filtered.put(e.getKey(), m);
         }
-        return filteredGraph;
+        return filtered;
     }
 
-    // Helper method to compare markings
-    private static boolean markingsMatch(Map<String, Integer> parentMarking, Map<String, Integer> childMarking) {
-        for (String place : parentMarking.keySet()) {
-            if (!childMarking.containsKey(place) || !childMarking.get(place).equals(parentMarking.get(place))) {
+    /** Kontroluje označenia len na vybraných miestach */
+    private static boolean markingsMatchOn(
+            Map<String, Integer> p,
+            Map<String, Integer> c,
+            Set<String> placesToCheck) {
+
+        for (String place : placesToCheck) {
+            if (!Objects.equals(p.get(place), c.get(place))) {
+                return false;
+            }
+        }
+        // navyše v c nesmú byť tokeny na inom mieste (ak to chceme prísnejšie)
+        for (String place : c.keySet()) {
+            if (!placesToCheck.contains(place) && c.get(place) > 0) {
                 return false;
             }
         }
         return true;
     }
 
-    // Gets the initial marking from the PetriNet
-    private static Map<String, Integer> getInitialMarking(PetriNet petriNet) {
-        Map<String, Integer> marking = new HashMap<>();
-        for (Place place : petriNet.getPlaces()) {
-            marking.put(place.getId(), place.getTokens());
+    private static Map<String, Integer> getInitialMarking(PetriNet net) {
+        Map<String, Integer> m = new HashMap<>();
+        for (Place p : net.getPlaces()) {
+            m.put(p.getId(), p.getTokens());
         }
-        return marking;
+        return m;
     }
 
-    // Checks if a transition can fire given the current marking
-    private static boolean canFire(Map<String, Integer> marking, Transition transition, PetriNet petriNet) {
-        for (Arc arc : petriNet.getArcs()) {
-            if (arc.getDestinationId().equals(transition.getId())) {
-                String sourcePlaceId = arc.getSourceId();
-                if (marking.getOrDefault(sourcePlaceId, 0) < arc.getMultiplicity()) {
+    private static boolean canFire(Map<String, Integer> marking, Transition t, PetriNet net) {
+        for (Arc a : net.getArcs()) {
+            if (a.getDestinationId().equals(t.getId())) {
+                if (marking.getOrDefault(a.getSourceId(), 0) < a.getMultiplicity()) {
                     return false;
                 }
             }
@@ -147,29 +183,26 @@ public class PetriNetUtils {
         return true;
     }
 
-    // Fires a transition and returns the new marking
-    private static Map<String, Integer> fireTransition(Map<String, Integer> marking, Transition transition, PetriNet petriNet) {
-        Map<String, Integer> newMarking = new HashMap<>(marking);
+    private static Map<String, Integer> fireTransition(
+            Map<String, Integer> marking, Transition t, PetriNet net) {
 
-        for (Arc arc : petriNet.getArcs()) {
-            if (arc.getDestinationId().equals(transition.getId())) {
-                String sourcePlaceId = arc.getSourceId();
-                newMarking.put(sourcePlaceId, newMarking.get(sourcePlaceId) - arc.getMultiplicity());
+        Map<String, Integer> nm = new HashMap<>(marking);
+        for (Arc a : net.getArcs()) {
+            if (a.getDestinationId().equals(t.getId())) {
+                nm.put(a.getSourceId(), nm.get(a.getSourceId()) - a.getMultiplicity());
             }
-            if (arc.getSourceId().equals(transition.getId())) {
-                String destinationPlaceId = arc.getDestinationId();
-                newMarking.put(destinationPlaceId, newMarking.getOrDefault(destinationPlaceId, 0) + arc.getMultiplicity());
+            if (a.getSourceId().equals(t.getId())) {
+                nm.put(a.getDestinationId(),
+                        nm.getOrDefault(a.getDestinationId(), 0) + a.getMultiplicity());
             }
         }
-
-        return newMarking;
+        return nm;
     }
 
-
-    // Checks if the new marking is covered by the previous marking
-    private static boolean isCovered(Map<String, Integer> previousMarking, Map<String, Integer> newMarking) {
-        for (String place : previousMarking.keySet()) {
-            if (previousMarking.get(place) > newMarking.getOrDefault(place, 0)) {
+    @SuppressWarnings("unused")
+    private static boolean isCovered(Map<String, Integer> prev, Map<String, Integer> next) {
+        for (String place : prev.keySet()) {
+            if (prev.get(place) > next.getOrDefault(place, 0)) {
                 return false;
             }
         }
