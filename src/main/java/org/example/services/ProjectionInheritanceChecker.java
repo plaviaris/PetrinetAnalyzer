@@ -1,126 +1,156 @@
-// ✅ ProjectionInheritanceChecker.java – prepracovaný algoritmus: parent transitions sa musia dať nasimulovať v childe cez tau
 package org.example.services;
 
 import org.example.objects.Transition;
-import java.util.*;
 
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.Set;
+
+/**
+ * ProjectionInheritanceChecker: overuje projekčné dedenie medzi rodičovským a detským dosiahnuteľnostným grafom.
+ * Oprava: teraz prehľadáva aj všetky vetvy tichých prechodov (tau),
+ * a kontroluje, že v žiadnej z týchto vetiev nemôže dieťa „zabuchnúť“ zdedený prechod rodiča.
+ */
 public class ProjectionInheritanceChecker {
 
-    public void printReachabilityGraphWithTau(String label,
-                                              Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph,
-                                              Set<String> parentTransitionIds) {
+    /**
+     * Vytlačí dosiahnuteľnostný graf, označí tiché (tau) prechody.
+     */
+    public void printReachabilityGraphWithTau(
+            String label,
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph,
+            Set<String> parentTransitionIds) {
 
         System.out.println("\n=== " + label + " Reachability Graph ===");
-        Set<Map<String, Integer>> tauTargets = new HashSet<>();
-
         for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> entry : graph.entrySet()) {
-            Map<String, Integer> from = entry.getKey();
-            Map<Transition, Map<String, Integer>> transitions = entry.getValue();
-            for (Map.Entry<Transition, Map<String, Integer>> tEntry : transitions.entrySet()) {
-                String id = tEntry.getKey().getId();
-                boolean isTau = !parentTransitionIds.contains(id);
-                String labelOut = isTau ? ("t(" + id + ")") : id;
+            Map<String, Integer> fromMarking = entry.getKey();
+            Map<Transition, Map<String, Integer>> outgoing = entry.getValue();
 
-                Map<String, Integer> to = tEntry.getValue();
-                if (isTau) tauTargets.add(to);
+            for (Map.Entry<Transition, Map<String, Integer>> transitionEntry : outgoing.entrySet()) {
+                Transition transition = transitionEntry.getKey();
+                Map<String, Integer> toMarking = transitionEntry.getValue();
 
-                System.out.println(from + " --" + labelOut + "--> " + to);
-            }
-        }
+                String transitionId = transition.getId();
+                boolean isTau = !parentTransitionIds.contains(transitionId);
+                String arrowLabel = isTau ? "τ(" + transitionId + ")" : transitionId;
 
-        if (!tauTargets.isEmpty()) {
-            System.out.println("\nStates reached by tau transitions:");
-            for (Map<String, Integer> tauState : tauTargets) {
-                System.out.println("τ-state: " + tauState);
+                System.out.println(fromMarking + " --" + arrowLabel + "--> " + toMarking);
             }
         }
     }
 
+    /**
+     * Kontroluje, či každé správanie (prechod) rodiča dokáže dieťa simulovať,
+     * a to aj cez tiché prechody (tau), pričom v žiadnej vetve nesmie
+     * dieťa zablokovať pôvodný prechod rodiča.
+     */
     public boolean checkProjectionInheritanceUsingReachabilityGraph(
             Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentGraph,
             Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> childGraph,
             Set<String> parentTransitionIds) {
 
         printReachabilityGraphWithTau("Parent", parentGraph, parentTransitionIds);
-        printReachabilityGraphWithTau("Child", childGraph, parentTransitionIds);
+        printReachabilityGraphWithTau("Child" , childGraph , parentTransitionIds);
 
-        System.out.println("\n=== Checking Projection Inheritance Simulation Path ===");
+        System.out.println("\n=== Checking Projection Inheritance ===");
 
         for (Map.Entry<Map<String, Integer>, Map<Transition, Map<String, Integer>>> parentEntry : parentGraph.entrySet()) {
-            Map<String, Integer> parentFrom = parentEntry.getKey();
-            Map<Transition, Map<String, Integer>> transitions = parentEntry.getValue();
+            Map<String, Integer> parentState = parentEntry.getKey();
+            Map<Transition, Map<String, Integer>> parentEdges = parentEntry.getValue();
 
-            for (Map.Entry<Transition, Map<String, Integer>> transitionEntry : transitions.entrySet()) {
-                Transition parentTransition = transitionEntry.getKey();
-                Map<String, Integer> parentTo = transitionEntry.getValue();
+            for (Map.Entry<Transition, Map<String, Integer>> parentTransitionEntry : parentEdges.entrySet()) {
+                Transition parentTransition = parentTransitionEntry.getKey();
+                Map<String, Integer> expectedParentNext = parentTransitionEntry.getValue();
 
-                boolean simulated = false;
-                for (Map<String, Integer> childStart : childGraph.keySet()) {
-                    if (!markingsMatchFiltered(parentFrom, childStart)) continue;
+                boolean simulatedSuccessfully = false;
 
-                    System.out.println("\n🔍 Simulating: " + parentFrom + " --" + parentTransition.getId() + "--> " + parentTo);
-                    System.out.println("   Starting from child state: " + childStart);
+                for (Map<String, Integer> childStartState : childGraph.keySet()) {
+                    if (!matchParentPlaces(parentState, childStartState, expectedParentNext.keySet())) {
+                        continue;
+                    }
 
-                    if (canSimulateTransitionStrict(parentTransition, childStart, childGraph, parentTo, parentTransitionIds, parentFrom)) {
-                        System.out.println("   ✅ Simulated successfully via tau.");
-                        simulated = true;
+                    System.out.println("Simulating: " + parentState + " --" + parentTransition.getId() + "--> " + expectedParentNext);
+                    System.out.println("Start child state: " + childStartState);
+
+                    if (canSimulate(
+                            childStartState,
+                            parentTransition,
+                            expectedParentNext,
+                            childGraph,
+                            parentTransitionIds,
+                            parentState)) {
+
+                        System.out.println("Simulated successfully from: " + childStartState);
+                        simulatedSuccessfully = true;
                         break;
                     } else {
-                        System.out.println("   ❌ Simulation failed.");
+                        System.out.println("Failed from child state: " + childStartState);
                     }
                 }
 
-                if (!simulated) {
-                    System.out.println("❌ Transition " + parentTransition.getId() + " from " + parentFrom + " to " + parentTo + " cannot be simulated in child.");
+                if (!simulatedSuccessfully) {
+                    System.out.println("Cannot simulate transition '" + parentTransition.getId() + "' from parent state " + parentState);
                     return false;
                 }
             }
         }
 
-        System.out.println("\n✅ Projection inheritance simulation confirmed.");
+        System.out.println("Projection inheritance confirmed.");
         return true;
     }
 
-    private boolean canSimulateTransitionStrict(Transition t, Map<String, Integer> start,
-                                                Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph,
-                                                Map<String, Integer> expectedTarget,
-                                                Set<String> parentTransitionIds,
-                                                Map<String, Integer> parentRelevantPlaces) {
+    /**
+     * Skontroluje, či z daného štartovacieho stavu vie dieťa simulovať
+     * prechod parentTransition do očakávaného stavu expectedParentNext.
+     * Preskúma všetky vetvy tichých prechodov a nesmie v žiadnej vetve
+     * zablokovať parentTransition.
+     */
+    private boolean canSimulate(
+            Map<String, Integer> startState,
+            Transition parentTransition,
+            Map<String, Integer> expectedParentNext,
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> childGraph,
+            Set<String> parentTransitionIds,
+            Map<String, Integer> parentRelevantPlaces) {
 
-        Set<Map<String, Integer>> visited = new HashSet<>();
         Queue<Map<String, Integer>> queue = new LinkedList<>();
-        queue.add(start);
-        visited.add(start);
+        Set<Map<String, Integer>> visited = new HashSet<>();
+
+        queue.add(startState);
+        visited.add(startState);
 
         while (!queue.isEmpty()) {
-            Map<String, Integer> state = queue.poll();
-            Map<Transition, Map<String, Integer>> transitions = graph.getOrDefault(state, Collections.emptyMap());
+            Map<String, Integer> currentState = queue.poll();
+            Map<Transition, Map<String, Integer>> outgoing = childGraph.getOrDefault(currentState, Collections.emptyMap());
 
-            for (Map.Entry<Transition, Map<String, Integer>> entry : transitions.entrySet()) {
-                Transition tr = entry.getKey();
-                Map<String, Integer> next = entry.getValue();
+            for (Map.Entry<Transition, Map<String, Integer>> entry : outgoing.entrySet()) {
+                Transition transition = entry.getKey();
+                Map<String, Integer> nextState = entry.getValue();
 
-                if (!parentTransitionIds.contains(tr.getId())) {
-                    // check if this tau transition changes relevant places from parent
-                    if (!relevantMarkingEqual(state, next, parentRelevantPlaces.keySet())) {
-                        System.out.println("   ❌ Tau transition " + tr.getId() + " modifies parent-relevant places: " + state + " -> " + next);
+                if (!parentTransitionIds.contains(transition.getId())) {
+                    if (!matchParentPlaces(currentState, nextState, parentRelevantPlaces.keySet())) {
+                        System.out.println("Tau '" + transition.getId() + "' zmenil rodičovské miesta: " + currentState + " -> " + nextState);
                         return false;
                     }
-                    if (!visited.contains(next)) {
-                        System.out.println("   τ following: " + tr.getId() + " to " + next);
-                        queue.add(next);
-                        visited.add(next);
+                    if (visited.add(nextState)) {
+                        System.out.println("τ→ " + transition.getId() + " leads to " + nextState);
+                        queue.add(nextState);
                     }
                 }
+            }
 
-                if (tr.getId().equals(t.getId())) {
-                    System.out.println("   ➡ Trying direct transition: " + tr.getId() + " from " + state);
-                    Set<Map<String, Integer>> closure = getTauClosureOnly(graph, next, parentTransitionIds);
-                    for (Map<String, Integer> mark : closure) {
-                        if (markingsMatchFiltered(expectedTarget, mark)) {
-                            System.out.println("   ✔ Reached expected state via tau: " + mark);
-                            return true;
-                        }
+            if (outgoing.containsKey(parentTransition)) {
+                Map<String, Integer> afterParent = outgoing.get(parentTransition);
+                Set<Map<String, Integer>> closure = tauClosure(childGraph, afterParent, parentTransitionIds);
+
+                for (Map<String, Integer> candidate : closure) {
+                    if (matchParentPlaces(expectedParentNext, candidate, expectedParentNext.keySet())) {
+                        System.out.println(parentTransition.getId() + "' simulated, reached " + candidate);
+                        return true;
                     }
                 }
             }
@@ -129,47 +159,51 @@ public class ProjectionInheritanceChecker {
         return false;
     }
 
-    private Set<Map<String, Integer>> getTauClosureOnly(
-            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> graph,
-            Map<String, Integer> initialState,
-            Set<String> parentTransitionIds) {
+    /**
+     * Vráti množinu stavov dosiahnuteľných len cez tiché prechody (tau-uzáver).
+     */
+    private Set<Map<String, Integer>> tauClosure(
+            Map<Map<String, Integer>, Map<Transition, Map<String, Integer>>> reachabilityGraph,
+            Map<String, Integer> initialMarking,
+            Set<String> visibleTransitionIds) {
 
-        Set<Map<String, Integer>> closure = new HashSet<>();
-        Queue<Map<String, Integer>> queue = new LinkedList<>();
-        closure.add(initialState);
-        queue.add(initialState);
+        Set<Map<String, Integer>> reachableViaTau = new HashSet<>();
+        Queue<Map<String, Integer>> frontier = new LinkedList<>();
 
-        while (!queue.isEmpty()) {
-            Map<String, Integer> state = queue.poll();
-            Map<Transition, Map<String, Integer>> transitions = graph.getOrDefault(state, Collections.emptyMap());
+        reachableViaTau.add(initialMarking);
+        frontier.add(initialMarking);
 
-            for (Map.Entry<Transition, Map<String, Integer>> entry : transitions.entrySet()) {
-                if (!parentTransitionIds.contains(entry.getKey().getId())) {
-                    Map<String, Integer> newState = entry.getValue();
-                    if (!closure.contains(newState)) {
-                        closure.add(newState);
-                        queue.add(newState);
+        while (!frontier.isEmpty()) {
+            Map<String, Integer> currentMarking = frontier.poll();
+            Map<Transition, Map<String, Integer>> successors = reachabilityGraph.getOrDefault(currentMarking, Collections.emptyMap());
+
+            for (Map.Entry<Transition, Map<String, Integer>> succEntry : successors.entrySet()) {
+                Transition transition = succEntry.getKey();
+                Map<String, Integer> nextMarking = succEntry.getValue();
+
+                if (!visibleTransitionIds.contains(transition.getId())) {
+                    if (reachableViaTau.add(nextMarking)) {
+                        frontier.add(nextMarking);
                     }
                 }
             }
         }
 
-        return closure;
+        return reachableViaTau;
     }
 
-    private boolean markingsMatchFiltered(Map<String, Integer> parentMarking, Map<String, Integer> childMarking) {
-        for (String place : parentMarking.keySet()) {
-            if (!childMarking.containsKey(place)) return false;
-            if (!Objects.equals(parentMarking.get(place), childMarking.get(place))) return false;
-        }
-        return true;
-    }
+    /** Porovná, že na všetkých rodičovských miestach sú tokeny rovnaké. */
+    private boolean matchParentPlaces(
+            Map<String, Integer> parentMarking,
+            Map<String, Integer> childMarking,
+            Set<String> parentPlaces) {
 
-    private boolean relevantMarkingEqual(Map<String, Integer> a, Map<String, Integer> b, Set<String> relevantPlaces) {
-        for (String place : relevantPlaces) {
-            int av = a.getOrDefault(place, 0);
-            int bv = b.getOrDefault(place, 0);
-            if (av != bv) return false;
+        for (String placeId : parentPlaces) {
+            Integer parentTokens = parentMarking.getOrDefault(placeId, 0);
+            Integer childTokens  = childMarking.getOrDefault(placeId, 0);
+            if (!Objects.equals(parentTokens, childTokens)) {
+                return false;
+            }
         }
         return true;
     }
